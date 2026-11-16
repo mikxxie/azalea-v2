@@ -23,7 +23,7 @@ jobs:
         id: dependencies
         run: |
           npm i -g pnpm
-          pnpm i
+          pnpm i --config.ignore-scripts=false
 
       - name: Build codebase
         id: build
