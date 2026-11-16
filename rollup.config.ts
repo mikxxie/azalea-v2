@@ -78,7 +78,7 @@ export default [
         plugins: [
             typescriptPaths({
                 preserveExtensions: true,
-                nonRelative: process.platform === 'darwin' ? false : true
+                nonRelative: false
             }),
             json(),
             esbuild({ minify: true, target: 'ES2020' }),
@@ -100,7 +100,7 @@ export default [
         plugins: [
             typescriptPaths({
                 preserveExtensions: true,
-                nonRelative: process.platform === 'darwin' ? false : true
+                nonRelative: false
             }),
             nodeResolve(),
             commonjs(),
