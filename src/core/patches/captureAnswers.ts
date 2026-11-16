@@ -68,7 +68,7 @@ function getBookworkCode(): string | null {
 
 function isSuccessResult(result: Element | null): result is HTMLElement {
     const text = result?.textContent?.trim() || '';
-    return !!result && /\b(?:correct|well\s*done)\b/i.test(text);
+    return !!result && /\b(?:(?:that(?:'s|\s*is)\s*)?(?:correct|right)|well\s*done|nice\s*(?:work|job|one)|great\s*(?:job|work)|good\s*(?:job|work)|excellent|perfect|awesome|brilliant|fantastic|superb|outstanding|amazing|keep\s*it\s*up|you(?:'ve|\s*have)\s*got\s*it|spot\s*on|well\s*played|nailed\s*it|you\s*did\s*it)\b/i.test(text);
 }
 
 function captureSuccessfulAnswer(result: HTMLElement, processedResults: WeakMap<HTMLElement, string>) {
