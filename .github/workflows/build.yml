@@ -23,7 +23,7 @@ jobs:
         id: dependencies
         run: |
           npm i -g pnpm
-          pnpm i --ignore-scripts=false
+          pnpm i --dangerously-allow-all-builds
 
       - name: Build codebase
         id: build
