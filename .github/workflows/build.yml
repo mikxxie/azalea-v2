@@ -1,14 +1,17 @@
 name: Build Azalea and Release
+
 on:
-  push:
   workflow_dispatch:
+
+permissions:
+  contents: write   #required for softprops/action-gh-release
 
 jobs:
   build:
     name: Build codebase and release
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Get version
         id: version
@@ -30,14 +33,14 @@ jobs:
         id: prepare
         run: |
           mv dist Azalea-${{ steps.version.outputs.value }}
-          zip -r Azalea.zip Azalea-${{ steps.version.outputs.value }} & wait $!;
+          zip -r Azalea.zip Azalea-${{ steps.version.outputs.value }}
 
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
-          token: "${{ secrets.GITHUB_TOKEN }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
           prerelease: false
-          tag_name: "${{ steps.version.outputs.value }}"
-          name: "Azalea ${{ steps.version.outputs.value }}"
+          tag_name: ${{ steps.version.outputs.value }}
+          name: Azalea ${{ steps.version.outputs.value }}
           files: |
             ./*.zip
