@@ -53,7 +53,7 @@ const defineExtendedConfig = ({ plugins, ...options }: RollupOptions) => defineC
     plugins: plugins ?? [
         typescriptPaths({
             preserveExtensions: true,
-            nonRelative: process.platform === 'darwin' ? false : true
+            nonRelative: false
         }),
         esbuild({ minify: true, target: 'ES2020' }),
         obfuscateCode()
