@@ -1,9 +1,9 @@
 {
     "name": "Azalea",
-    "version": "3.6.4",
+    "version": "3.6.5",
     "description": "The cutest SparxMaths extension for Chromium ~!",
     "manifest_version": 3,
-    "author": "Rosie",
+    "author": "Rosie/mikxxie",
 
     "icons": {
         "128": "assets/logo.png"
