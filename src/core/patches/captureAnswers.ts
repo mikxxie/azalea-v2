@@ -39,7 +39,7 @@ function processAnswers(input: Record<string, Record<string, any>>) {
         });
     }
 
-    // Fallback to actual answer fields only; don't treat selected task labels as answers.
+    // Fallback only to actual answer fields, never to selected task labels or generic selected elements.
     if (answers.length === 0) {
         document.querySelectorAll('input[class*="_TextField_"], textarea[class*="_TextField_"]').forEach(el => {
             const value = (el as HTMLInputElement | HTMLTextAreaElement).value?.trim();
@@ -51,65 +51,49 @@ function processAnswers(input: Record<string, Record<string, any>>) {
 }
 
 function getBookworkCode(): string | null {
-    // Try several places Sparx has used for the code
     const chip = document.querySelector('[class*="_Bookwork_"], [class*="Bookwork"]');
     if (chip?.textContent) {
         const code = chip.textContent.replace(/bookwork\s*/i, '').trim();
         if (code) return code;
     }
 
-    // This React-props fallback was not useful on the current question UI:
-    // QuestionInfo exposes bookworkCode as an empty string, so it cannot identify the task.
-    /*
-    const infoEl = document.querySelector(
-        '[class*="_QuestionInfo_"], [class*="QuestionInfo"], [class*="_Info_"]'
-    );
-    if (infoEl) {
-        try {
-            const fiber = findReact(infoEl);
-            const code =
-                fiber?.memoizedProps?.bookworkCode ||
-                fiber?.memoizedProps?.code ||
-                fiber?.pendingProps?.bookworkCode;
-            if (code) return String(code);
-        } catch {}
-    }
-    */
-
-    // The current question UI marks its task in the selected task item (for example, "4A").
+    // Sparx currently exposes an empty bookworkCode prop, so use the selected task link instead.
     const selectedTask = document.querySelector(
         '[class*="_Selected_"][class*="TaskItem"], [class*="_TaskItemLink_"][class*="_Selected_"]'
     );
-    const match = selectedTask?.textContent?.trim().match(/\b[A-Z]?\d+[A-Z]?\b/i);
-    if (match) return match[0].toUpperCase();
-
-    return null;
+    const label = selectedTask?.textContent?.trim() || '';
+    // Require the whole selected label to be a task code; don't extract a code from arbitrary text.
+    return /^[A-Z]?\d+[A-Z]?$/i.test(label) ? label.toUpperCase() : null;
 }
 
-function handler() {
-    // Only capture after the site confirms the answer was correct.
-    const result = document.querySelector('[class*="_ResultInfoWrapper_"]');
-    const resultText = result?.textContent?.trim() || '';
-    if (!/\b(?:correct|well\s*done)\b/i.test(resultText)) return;
+function isSuccessResult(result: Element | null): result is HTMLElement {
+    const text = result?.textContent?.trim() || '';
+    return !!result && /\b(?:correct|well\s*done)\b/i.test(text);
+}
 
-    // Only run when we are actually on a question
+function captureSuccessfulAnswer(result: HTMLElement, processedResults: WeakMap<HTMLElement, string>) {
+    const resultText = result.textContent?.trim() || '';
+    if (!isSuccessResult(result) || processedResults.get(result) === resultText) return;
+
     const possibleWrapper =
         document.querySelector('[class*="_QuestionWrapper_"]') ||
         document.querySelector('[class*="QuestionWrapper"]') ||
         document.querySelector('[class*="_Question_"]');
+    if (!possibleWrapper) return;
 
-    if (!possibleWrapper) {
+    const code = getBookworkCode();
+    if (!code) {
+        logger.debug('Capture skipped: no selected bookwork code', { resultText });
         return;
     }
 
-    let code = getBookworkCode();
     let answers: string[] = [];
     let id = '';
 
     try {
-        const QuestionWrapper = findReact(possibleWrapper);
+        const questionWrapper = findReact(possibleWrapper);
         const endpoint = findInReactTree(
-            QuestionWrapper?.memoizedProps?.children,
+            questionWrapper?.memoizedProps?.children,
             (x: any) => x?.layout && x?.input
         );
 
@@ -127,51 +111,56 @@ function handler() {
                 })?.text || '';
         }
     } catch (e) {
-        logger.debug('React tree walk failed, falling back to DOM', e);
+        logger.debug('React tree walk failed; trying answer fields', e);
     }
 
-    if (!code) {
-        // Last resort – look for any chip that looks like a bookwork code
-        const chips = document.querySelectorAll('[class*="Chip"], [class*="chip"]');
-        for (const chip of chips) {
-            const t = chip.textContent || '';
-            if (/^[A-Z]?\d+[A-Z]?$/i.test(t.trim()) || /bookwork/i.test(t)) {
-                code = t.replace(/bookwork\s*/i, '').trim();
-                break;
-            }
-        }
-    }
+    if (answers.length === 0) answers = processAnswers({});
 
-    if (!code || answers.length === 0) {
-        logger.debug('Capture skipped', { code, answers, resultText });
+    // Never store the task label itself as an answer.
+    answers = answers.filter(answer => answer.trim().toUpperCase() !== code);
+    if (answers.length === 0) {
+        logger.debug('Capture skipped: no answer value', { code, resultText });
         return;
     }
 
     const sanitise = (str: string) => str.replace(/\$.*?\$/g, '').replace(/ +/g, ' ');
-
     const existing = bookwork.get(code) ?? [];
     bookwork.set(code, [
         ...existing.filter((x: any) => sanitise(x.id || '') !== sanitise(id)),
         { id: id || `q-${Date.now()}`, answers, date: Date.now() }
     ]);
 
+    // Mark only after a successful save, so missing answer data can be retried if the result updates.
+    processedResults.set(result, resultText);
     logger.log(`Saved bookwork ${code}:`, answers);
 }
 
+function containsResultBanner(node: Node): boolean {
+    if (!(node instanceof Element)) return false;
+    return (
+        node.matches('[class*="_ResultInfoWrapper_"]') ||
+        !!node.querySelector('[class*="_ResultInfoWrapper_"]')
+    );
+}
+
 export default async function () {
-    // Capture on click / key (when user submits an answer); handler ignores non-success states.
-    document.addEventListener('pointerdown', handler, { capture: true });
-    document.addEventListener('keydown', handler, { capture: true });
+    // Saving is driven only by insertion/updates to the result banner. Typing and navigation
+    // mutations elsewhere on the page cannot capture partial answers or re-save stale values.
+    const processedResults = new WeakMap<HTMLElement, string>();
+    const observer = new MutationObserver(records => {
+        const result = document.querySelector('[class*="_ResultInfoWrapper_"]') as HTMLElement | null;
+        if (!result) return;
 
-    // Also try after a short delay when the page changes, once the result banner is rendered.
-    const obs = new MutationObserver(() => {
-        setTimeout(handler, 400);
+        const resultChanged = records.some(record => {
+            if (result.contains(record.target) || record.target === result) return true;
+            return [...record.addedNodes].some(containsResultBanner);
+        });
+        if (!resultChanged || !isSuccessResult(result)) return;
+
+        // Allow the site's answer state to settle after it renders the success message.
+        setTimeout(() => captureSuccessfulAnswer(result, processedResults), 400);
     });
-    obs.observe(document.body, { childList: true, subtree: true });
 
-    return () => {
-        document.removeEventListener('pointerdown', handler, { capture: true });
-        document.removeEventListener('keydown', handler, { capture: true });
-        obs.disconnect();
-    };
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
 }
