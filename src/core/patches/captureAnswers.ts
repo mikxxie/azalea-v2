@@ -57,10 +57,13 @@ function getBookworkCode(): string | null {
     // Try several places Sparx has used for the code
     const chip = document.querySelector('[class*="_Bookwork_"], [class*="Bookwork"]');
     if (chip?.textContent) {
-        return chip.textContent.replace(/bookwork\s*/i, '').trim() || null;
+        const code = chip.textContent.replace(/bookwork\s*/i, '').trim();
+        if (code) return code;
     }
 
-    // React props fallback
+    // This React-props fallback was not useful on the current question UI:
+    // QuestionInfo exposes bookworkCode as an empty string, so it cannot identify the task.
+    /*
     const infoEl = document.querySelector(
         '[class*="_QuestionInfo_"], [class*="QuestionInfo"], [class*="_Info_"]'
     );
@@ -74,6 +77,14 @@ function getBookworkCode(): string | null {
             if (code) return String(code);
         } catch {}
     }
+    */
+
+    // The current question UI marks its task in the selected task item (for example, "4A").
+    const selectedTask = document.querySelector(
+        '[class*="_Selected_"][class*="TaskItem"], [class*="_TaskItemLink_"][class*="_Selected_"]'
+    );
+    const match = selectedTask?.textContent?.trim().match(/\b[A-Z]?\d+[A-Z]?\b/i);
+    if (match) return match[0].toUpperCase();
 
     return null;
 }
