@@ -39,14 +39,11 @@ function processAnswers(input: Record<string, Record<string, any>>) {
         });
     }
 
-    // Fallback: also try to grab visible answer text from the DOM
+    // Fallback to actual answer fields only; don't treat selected task labels as answers.
     if (answers.length === 0) {
-        const answerEls = document.querySelectorAll(
-            '[class*="_Answer_"], [class*="answer-block"], [class*="_AnswerBlock_"]'
-        );
-        answerEls.forEach(el => {
-            const t = (el as HTMLElement).innerText?.trim();
-            if (t) answers.push(t);
+        document.querySelectorAll('input[class*="_TextField_"], textarea[class*="_TextField_"]').forEach(el => {
+            const value = (el as HTMLInputElement | HTMLTextAreaElement).value?.trim();
+            if (value) answers.push(value);
         });
     }
 
@@ -90,6 +87,11 @@ function getBookworkCode(): string | null {
 }
 
 function handler() {
+    // Only capture after the site confirms the answer was correct.
+    const result = document.querySelector('[class*="_ResultInfoWrapper_"]');
+    const resultText = result?.textContent?.trim() || '';
+    if (!/\b(?:correct|well\s*done)\b/i.test(resultText)) return;
+
     // Only run when we are actually on a question
     const possibleWrapper =
         document.querySelector('[class*="_QuestionWrapper_"]') ||
@@ -128,17 +130,6 @@ function handler() {
         logger.debug('React tree walk failed, falling back to DOM', e);
     }
 
-    // DOM fallback for answers if React failed
-    if (answers.length === 0) {
-        const selected = document.querySelectorAll(
-            '[aria-checked="true"], [class*="selected"], [class*="Selected"]'
-        );
-        selected.forEach(el => {
-            const t = (el as HTMLElement).innerText?.trim();
-            if (t && t.length < 80) answers.push(t);
-        });
-    }
-
     if (!code) {
         // Last resort – look for any chip that looks like a bookwork code
         const chips = document.querySelectorAll('[class*="Chip"], [class*="chip"]');
@@ -152,7 +143,7 @@ function handler() {
     }
 
     if (!code || answers.length === 0) {
-        logger.debug('Capture skipped', { code, answers });
+        logger.debug('Capture skipped', { code, answers, resultText });
         return;
     }
 
@@ -168,11 +159,11 @@ function handler() {
 }
 
 export default async function () {
-    // Capture on click / key (when user submits an answer)
+    // Capture on click / key (when user submits an answer); handler ignores non-success states.
     document.addEventListener('pointerdown', handler, { capture: true });
     document.addEventListener('keydown', handler, { capture: true });
 
-    // Also try after a short delay when the page changes
+    // Also try after a short delay when the page changes, once the result banner is rendered.
     const obs = new MutationObserver(() => {
         setTimeout(handler, 400);
     });
