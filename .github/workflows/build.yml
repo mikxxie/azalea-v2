@@ -34,6 +34,7 @@ jobs:
         run: |
           mv dist Azalea-${{ steps.version.outputs.value }}
           zip -r Azalea.zip Azalea-${{ steps.version.outputs.value }}
+          unzip -l Azalea.zip
 
       - name: Create release
         uses: softprops/action-gh-release@v1
