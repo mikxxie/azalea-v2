@@ -5,19 +5,21 @@ import { storages } from '@core/handlers/state';
 const { findReact, findInTree, findInReactTree, isEmpty } = utilities;
 const { bookwork } = storages;
 
-function processAnswers(input: Record<string, Record<string, any>>) {
+function processAnswers(input: Record<string, any> = {}) {
     const answers: string[] = [];
 
     if (!isEmpty(input?.number_fields)) {
         Object.values(input.number_fields).forEach((field: any) => {
-            if (field?.value) answers.push(String(field.value));
+            if (field?.value != null && String(field.value).trim()) {
+                answers.push(String(field.value).trim());
+            }
         });
     }
 
     if (!isEmpty(input?.cards)) {
         Object.values(input.cards).forEach((card: any) => {
             if (card?.slot_ref && card?.content?.[0]?.text) {
-                answers.push(card.content[0].text);
+                answers.push(String(card.content[0].text).trim());
             }
         });
     }
@@ -34,66 +36,79 @@ function processAnswers(input: Record<string, Record<string, any>>) {
             }
 
             if (choice.content?.[0]?.text) {
-                answers.push(choice.content[0].text);
+                answers.push(String(choice.content[0].text).trim());
             }
         });
     }
 
-    // Fallback only to actual answer fields, never to selected task labels or generic selected elements.
-    if (answers.length === 0) {
-        document.querySelectorAll('input[class*="_TextField_"], textarea[class*="_TextField_"]').forEach(el => {
+    return answers.filter(Boolean);
+}
+
+function getAnswersFromDom(): string[] {
+    const answers: string[] = [];
+
+    document
+        .querySelectorAll('input[class*="_TextField_"], textarea[class*="_TextField_"]')
+        .forEach(el => {
             const value = (el as HTMLInputElement | HTMLTextAreaElement).value?.trim();
             if (value) answers.push(value);
         });
-    }
 
-    return answers;
+    document
+        .querySelectorAll(
+            '[class*="_Option_"][aria-checked="true"], [role="radio"][aria-checked="true"]'
+        )
+        .forEach(el => {
+            const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text) answers.push(text);
+        });
+
+    return [...new Set(answers)];
 }
 
-function getBookworkCode(): string | null {
+function getBookworkCode(questionInfoFiber: any): string | null {
+    const fromProps = questionInfoFiber?.memoizedProps?.bookworkCode;
+    if (fromProps && String(fromProps).trim()) {
+        return String(fromProps).trim().toUpperCase();
+    }
+
     const chip = document.querySelector('[class*="_Bookwork_"], [class*="Bookwork"]');
     if (chip?.textContent) {
         const code = chip.textContent.replace(/bookwork\s*/i, '').trim();
-        if (code) return code;
+        if (code) return code.toUpperCase();
     }
 
-    // Sparx currently exposes an empty bookworkCode prop, so use the selected task link instead.
     const selectedTask = document.querySelector(
-        '[class*="_Selected_"][class*="TaskItem"], [class*="_TaskItemLink_"][class*="_Selected_"]'
+        '[class*="_TaskItemLink_"][class*="_Selected_"], [class*="_Selected_"][class*="TaskItem"]'
     );
     const label = selectedTask?.textContent?.trim() || '';
-    // Require the whole selected label to be a task code; don't extract a code from arbitrary text.
-    return /^[A-Z]?\d+[A-Z]?$/i.test(label) ? label.toUpperCase() : null;
+    if (/^[A-Z]?\d+[A-Z]?$/i.test(label)) return label.toUpperCase();
+
+    return null;
 }
 
-function isSuccessResult(result: Element | null): result is HTMLElement {
-    const text = result?.textContent?.trim() || '';
-    return !!result && /\b(?:(?:that(?:'s|\s*is)\s*)?(?:correct|right)|well\s*done|nice\s*(?:work|job|one)|great\s*(?:job|work)|good\s*(?:job|work)|excellent|perfect|awesome|brilliant|fantastic|superb|outstanding|amazing|keep\s*it\s*up|you(?:'ve|\s*have)\s*got\s*it|spot\s*on|well\s*played|nailed\s*it|you\s*did\s*it)\b/i.test(text);
-}
+function handler() {
+    const possibleQuestionWrapper = document.querySelector(
+        '[class*="_QuestionWrapper_"]'
+    ) as HTMLDivElement | null;
+    const possibleQuestionInfo = document.querySelector('[class*="_QuestionInfo_"]');
 
-function captureSuccessfulAnswer(result: HTMLElement, processedResults: WeakMap<HTMLElement, string>) {
-    const resultText = result.textContent?.trim() || '';
-    if (!isSuccessResult(result) || processedResults.get(result) === resultText) return;
-
-    const possibleWrapper =
-        document.querySelector('[class*="_QuestionWrapper_"]') ||
-        document.querySelector('[class*="QuestionWrapper"]') ||
-        document.querySelector('[class*="_Question_"]');
-    if (!possibleWrapper) return;
-
-    const code = getBookworkCode();
-    if (!code) {
-        logger.debug('Capture skipped: no selected bookwork code', { resultText });
-        return;
+    if (!possibleQuestionWrapper || !possibleQuestionInfo) {
+        return; // not on a question page
     }
 
-    let answers: string[] = [];
     let id = '';
+    let answers: string[] = [];
+    let code: string | null = null;
 
     try {
-        const questionWrapper = findReact(possibleWrapper);
+        const QuestionWrapper = findReact(possibleQuestionWrapper);
+        const QuestionInfo = findReact(possibleQuestionInfo);
+
+        code = getBookworkCode(QuestionInfo);
+
         const endpoint = findInReactTree(
-            questionWrapper?.memoizedProps?.children,
+            QuestionWrapper?.memoizedProps?.children,
             (x: any) => x?.layout && x?.input
         );
 
@@ -111,56 +126,45 @@ function captureSuccessfulAnswer(result: HTMLElement, processedResults: WeakMap<
                 })?.text || '';
         }
     } catch (e) {
-        logger.debug('React tree walk failed; trying answer fields', e);
+        logger.debug('React capture failed', e);
     }
 
-    if (answers.length === 0) answers = processAnswers({});
+    if (!code) code = getBookworkCode(null);
+    if (answers.length === 0) answers = getAnswersFromDom();
 
-    // Never store the task label itself as an answer.
-    answers = answers.filter(answer => answer.trim().toUpperCase() !== code);
-    if (answers.length === 0) {
-        logger.debug('Capture skipped: no answer value', { code, resultText });
+    // Don't store task label as answer
+    if (code) {
+        answers = answers.filter(a => a.trim().toUpperCase() !== code);
+    }
+
+    if (!code || answers.length < 1) {
+        logger.debug('Answers failed to parse or no answers selected:', {
+            id,
+            code,
+            answers
+        });
         return;
     }
 
     const sanitise = (str: string) => str.replace(/\$.*?\$/g, '').replace(/ +/g, ' ');
-    const existing = bookwork.get(code) ?? [];
+
     bookwork.set(code, [
-        ...existing.filter((x: any) => sanitise(x.id || '') !== sanitise(id)),
+        ...(bookwork.get(code) ?? []).filter(
+            (x: any) => sanitise(x.id || '') !== sanitise(id || '')
+        ),
         { id: id || `q-${Date.now()}`, answers, date: Date.now() }
     ]);
 
-    // Mark only after a successful save, so missing answer data can be retried if the result updates.
-    processedResults.set(result, resultText);
     logger.log(`Saved bookwork ${code}:`, answers);
 }
 
-function containsResultBanner(node: Node): boolean {
-    if (!(node instanceof Element)) return false;
-    return (
-        node.matches('[class*="_ResultInfoWrapper_"]') ||
-        !!node.querySelector('[class*="_ResultInfoWrapper_"]')
-    );
-}
-
 export default async function () {
-    // Saving is driven only by insertion/updates to the result banner. Typing and navigation
-    // mutations elsewhere on the page cannot capture partial answers or re-save stale values.
-    const processedResults = new WeakMap<HTMLElement, string>();
-    const observer = new MutationObserver(records => {
-        const result = document.querySelector('[class*="_ResultInfoWrapper_"]') as HTMLElement | null;
-        if (!result) return;
+    // Original behaviour: capture on submit click / enter, while answer is still present
+    document.addEventListener('pointerdown', handler, { capture: true });
+    document.addEventListener('keydown', handler, { capture: true });
 
-        const resultChanged = records.some(record => {
-            if (result.contains(record.target) || record.target === result) return true;
-            return [...record.addedNodes].some(containsResultBanner);
-        });
-        if (!resultChanged || !isSuccessResult(result)) return;
-
-        // Allow the site's answer state to settle after it renders the success message.
-        setTimeout(() => captureSuccessfulAnswer(result, processedResults), 400);
-    });
-
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
+    return () => {
+        document.removeEventListener('pointerdown', handler, { capture: true });
+        document.removeEventListener('keydown', handler, { capture: true });
+    };
 }
