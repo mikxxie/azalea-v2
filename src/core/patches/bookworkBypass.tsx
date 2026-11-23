@@ -2,12 +2,10 @@ import logger from '@logger';
 import utilities from '@utilities';
 import { storages } from '@handlers/state';
 import { common } from '@core/modules';
-import { TextWithMaths } from '@core/components/katex';
 import { createStyleSheet, commonStyles } from '@core/stylesheet';
 
 const { lazyDefine } = utilities;
 const { bookwork } = storages;
-const { React } = common;
 
 const { styles } = createStyleSheet({
     item: {
@@ -17,15 +15,9 @@ const { styles } = createStyleSheet({
         paddingBlock: '0.4em',
         paddingInline: '0.6em',
         borderRadius: '4px'
-    },
-    images: {
-        justifyContent: 'space-between',
-        gap: '1em',
-        marginBlock: '0.5em'
     }
 });
 
-// Rainbow ring keyframes (inject once)
 if (!document.getElementById('azalea-glow-style')) {
     const style = document.createElement('style');
     style.id = 'azalea-glow-style';
@@ -90,36 +82,119 @@ if (!document.getElementById('azalea-glow-style')) {
     document.head.appendChild(style);
 }
 
+/** Expand latex / KaTeX-ish text into a comparable string */
 function normalise(text: string) {
     return String(text)
         .toLowerCase()
-        // drop latex commands / braces but keep numbers and units letters
+        .replace(/\u200b/g, '') // zero-width space from KaTeX
+        .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1/$2')
+        .replace(/\\times/g, 'x')
         .replace(/\\[a-z]+/gi, '')
-        .replace(/[^a-z0-9.]/g, '')
+        .replace(/−/g, '-') // unicode minus
+        .replace(/[^a-z0-9./-]/g, '')
+        .replace(/\/+/g, '/')
         .trim();
 }
 
-/** True if stored answer and option text refer to the same value */
-function isMatch(storedRaw: string, optionRaw: string) {
+/** Turn multi-field answers like ['2','9'] or ['-2','9'] into '-2/9' when it looks like a fraction */
+function expandAnswers(answers: string[]): string[] {
+    const out = answers.map(String);
+    if (out.length === 2 && out.every(a => /^-?\d+$/.test(a.trim()))) {
+        out.push(`${out[0].trim()}/${out[1].trim()}`);
+    }
+    if (out.length === 1 && /^-?\d+\/\d+$/.test(out[0].trim())) {
+        // already a fraction string
+    }
+    return out;
+}
+
+/**
+ * Score how well stored answer matches option text.
+ * Higher = better. 0 = no match.
+ * Rejects bare single-digit / very short tokens that pollute includes().
+ */
+function matchScore(storedRaw: string, optionRaw: string): number {
     const s = normalise(storedRaw);
     const o = normalise(optionRaw);
-    if (!s || !o) return false;
-    if (s === o) return true;
-    if (o.includes(s) || s.includes(o)) return true;
+    if (!s || !o) return 0;
 
-    // Compare leading numeric token (handles "6.32" vs "6.32g/cm3...")
-    const num = (t: string) => (t.match(/\d+(?:\.\d+)?/) || [])[0] || '';
-    const sn = num(s);
-    const on = num(o);
-    if (sn && on && sn === on && (s.includes(sn) && o.includes(on))) {
-        // same number + shared unit-ish letters if any
-        const unit = (t: string) => t.replace(/[\d.]+/g, '');
+    // Exact
+    if (s === o) return 1000 + s.length;
+
+    // Fraction exact after normalise (e.g. -2/9)
+    if (/^-?\d+\/\d+$/.test(s) && o.includes(s)) return 800 + s.length;
+    if (/^-?\d+\/\d+$/.test(s)) {
+        // KaTeX often shows "2 9" stacked → digits may appear as "29" or interleaved
+        const m = s.match(/^(-?)(\d+)\/(\d+)$/);
+        if (m) {
+            const [, sign, num, den] = m;
+            // option contains both numerator and denominator near each other
+            if (o.includes(num) && o.includes(den)) {
+                const hasNeg =
+                    sign === '-'
+                        ? /^-|negative|minus/.test(optionRaw.toLowerCase()) || o.startsWith('-') || o.includes(`-${num}`)
+                        : true;
+                if (hasNeg) return 600 + s.length;
+            }
+        }
+    }
+
+    // Full stored string contained in option (require meaningful length)
+    if (s.length >= 2 && o.includes(s)) return 400 + s.length;
+    if (s.length >= 2 && s.includes(o) && o.length >= 2) return 300 + o.length;
+
+    // Numeric + unit style (6.32 vs 6.32g/cm3) — only if stored number is not a single digit
+    const sn = (s.match(/-?\d+(?:\.\d+)?/) || [])[0] || '';
+    const on = (o.match(/-?\d+(?:\.\d+)?/) || [])[0] || '';
+    if (sn && on && sn === on && sn.replace('-', '').length >= 2) {
+        const unit = (t: string) => t.replace(/[\d./-]+/g, '');
         const su = unit(s);
         const ou = unit(o);
-        if (!su || !ou) return true;
-        return ou.includes(su) || su.includes(ou);
+        if (!su || !ou || ou.includes(su) || su.includes(ou)) return 200 + sn.length;
     }
-    return false;
+
+    // NEVER match on a lone single character / single digit via includes
+    return 0;
+}
+
+function pickUsefulEntries(stored: any[]): any[] {
+    if (!Array.isArray(stored)) return [];
+
+    const withAnswers = stored.filter(
+        (x: any) => Array.isArray(x.answers) && x.answers.length > 0
+    );
+
+    // Prefer real question-text ids over live-/q- timestamps
+    const ranked = [...withAnswers].sort((a, b) => {
+        const score = (e: any) => {
+            const id = String(e.id || '');
+            let s = 0;
+            if (id && !id.startsWith('q-') && !id.startsWith('live-')) s += 100;
+            if (id.startsWith('live-')) s += 50;
+            // longer joined answers usually better
+            s += String(e.answers.join('')).length;
+            s += (e.date || 0) / 1e13; // slight recency
+            return s;
+        };
+        return score(b) - score(a);
+    });
+
+    // Keep top few useful ones for UI; matching uses expand on these
+    return ranked.slice(0, 5);
+}
+
+function getCandidateAnswers(entries: any[]): string[] {
+    const set = new Set<string>();
+    for (const e of entries) {
+        for (const a of expandAnswers(e.answers.map(String))) {
+            const n = normalise(a);
+            // drop useless single-digit-only tokens from the candidate pool
+            if (!n) continue;
+            if (/^-?\d$/.test(n)) continue;
+            set.add(a);
+        }
+    }
+    return [...set];
 }
 
 function applyRainbowGlow(el: HTMLElement) {
@@ -143,10 +218,8 @@ function handler() {
         .toUpperCase();
     if (!code) return;
 
-    // Only skip if we already handled THIS code
     const existing = document.getElementById('azalea-wac-content') as HTMLElement | null;
     if (existing?.dataset?.code === code) {
-        // Still try to paint glow if options mounted later
         paintMatches(code);
         return;
     }
@@ -155,13 +228,11 @@ function handler() {
     logger.log('Bookwork check detected:', code);
 
     const stored = bookwork.get(code) ?? bookwork.get(code.toLowerCase()) ?? [];
-    const answers = Array.isArray(stored)
-        ? stored.filter((x: any) => Array.isArray(x.answers) && x.answers.length > 0)
-        : [];
+    const useful = pickUsefulEntries(Array.isArray(stored) ? stored : []);
 
-    logger.log('Stored entries for', code, answers);
+    logger.log('Useful entries for', code, useful);
 
-    if (answers.length > 0) {
+    if (useful.length > 0) {
         const title =
             dialog.querySelector('[class*="_DialogTitle_"]') || dialog.firstElementChild;
         const container = document.createElement('div');
@@ -170,7 +241,7 @@ function handler() {
         container.style.cssText = 'text-align:center;margin:12px 0;';
         container.innerHTML = `
             <div style="font-weight:600;margin-bottom:8px;">Stored answers for ${code}:</div>
-            ${answers
+            ${useful
                 .slice(0, 3)
                 .map(
                     (s: any) => `
@@ -190,7 +261,6 @@ function handler() {
         logger.info('No stored answers for', code);
     }
 
-    // Options often mount a tick later
     if (!paintMatches(code)) {
         setTimeout(() => paintMatches(code), 200);
         setTimeout(() => paintMatches(code), 500);
@@ -199,10 +269,8 @@ function handler() {
 
 function paintMatches(code: string) {
     const stored = bookwork.get(code) ?? bookwork.get(code.toLowerCase()) ?? [];
-    const answers = Array.isArray(stored)
-        ? stored.filter((x: any) => Array.isArray(x.answers) && x.answers.length > 0)
-        : [];
-    if (!answers.length) return false;
+    const useful = pickUsefulEntries(Array.isArray(stored) ? stored : []);
+    if (!useful.length) return false;
 
     const options = [
         ...document.querySelectorAll(
@@ -215,24 +283,38 @@ function paintMatches(code: string) {
         return false;
     }
 
-    const storedAnswers = answers.flatMap((s: any) => s.answers.map(String));
-    let matched = 0;
+    const candidates = getCandidateAnswers(useful);
 
-    options.forEach(opt => {
-        if (opt.dataset.azaleaGlow === code) return;
-
-        const optText = opt.innerText || '';
-        const hit = storedAnswers.some(a => isMatch(a, optText));
-        if (!hit) return;
-
-        applyRainbowGlow(opt);
-        opt.dataset.azaleaGlow = code;
-        matched++;
-        logger.log('Matched option:', optText.replace(/\s+/g, ' ').slice(0, 80));
-        // NO auto-select — glow only
+    // Score every option; only glow the best (and ties within a small margin)
+    const scored = options.map(opt => {
+        const text = opt.innerText || '';
+        let best = 0;
+        let via = '';
+        for (const a of candidates) {
+            const sc = matchScore(a, text);
+            if (sc > best) {
+                best = sc;
+                via = a;
+            }
+        }
+        return { opt, best, via, text };
     });
 
-    return matched > 0 || options.length > 0;
+    const max = Math.max(0, ...scored.map(s => s.best));
+    if (max <= 0) {
+        logger.info('No confident match for', code, { candidates });
+        return true; // options exist, just no match
+    }
+
+    scored.forEach(({ opt, best, via, text }) => {
+        if (best < max || best <= 0) return;
+        if (opt.dataset.azaleaGlow === code) return;
+        applyRainbowGlow(opt);
+        opt.dataset.azaleaGlow = code;
+        logger.log('Matched option:', text.replace(/\s+/g, ' ').slice(0, 80), 'via', via, 'score', best);
+    });
+
+    return true;
 }
 
 export default async function () {
