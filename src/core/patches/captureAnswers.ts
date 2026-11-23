@@ -148,11 +148,13 @@ function handler() {
 
     const sanitise = (str: string) => str.replace(/\$.*?\$/g, '').replace(/ +/g, ' ');
 
+    const entryId = id || `live-${code}`;
+
     bookwork.set(code, [
         ...(bookwork.get(code) ?? []).filter(
-            (x: any) => sanitise(x.id || '') !== sanitise(id || '')
+            (x: any) => sanitise(x.id || '') !== sanitise(entryId)
         ),
-        { id: id || `q-${Date.now()}`, answers, date: Date.now() }
+        { id: entryId, answers, date: Date.now() }
     ]);
 
     logger.log(`Saved bookwork ${code}:`, answers);
