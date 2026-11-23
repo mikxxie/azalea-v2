@@ -201,6 +201,19 @@ function applyRainbowGlow(el: HTMLElement) {
     el.classList.add('azalea-rainbow-glow');
 }
 
+function setBannerStatus(code: string, status: string) {
+    const el = document.getElementById('azalea-wac-content');
+    if (!el || el.dataset.code !== code) return;
+    let statusEl = el.querySelector('.azalea-wac-status') as HTMLElement | null;
+    if (!statusEl) {
+        statusEl = document.createElement('div');
+        statusEl.className = 'azalea-wac-status';
+        statusEl.style.cssText = 'font-size:12px;opacity:0.85;margin-top:6px;';
+        el.appendChild(statusEl);
+    }
+    statusEl.textContent = status;
+}
+
 function handler() {
     const dialog =
         document.querySelector('[class*="_DialogContent_"]') ||
@@ -220,6 +233,7 @@ function handler() {
 
     const existing = document.getElementById('azalea-wac-content') as HTMLElement | null;
     if (existing?.dataset?.code === code) {
+        // Already injected — keep trying to paint until we get a match
         paintMatches(code);
         return;
     }
@@ -232,13 +246,15 @@ function handler() {
 
     logger.log('Useful entries for', code, useful);
 
+    // Always show banner so user knows Azalea saw the check
+    const title =
+        dialog.querySelector('[class*="_DialogTitle_"]') || dialog.firstElementChild;
+    const container = document.createElement('div');
+    container.id = 'azalea-wac-content';
+    container.dataset.code = code;
+    container.style.cssText = 'text-align:center;margin:12px 0;';
+
     if (useful.length > 0) {
-        const title =
-            dialog.querySelector('[class*="_DialogTitle_"]') || dialog.firstElementChild;
-        const container = document.createElement('div');
-        container.id = 'azalea-wac-content';
-        container.dataset.code = code;
-        container.style.cssText = 'text-align:center;margin:12px 0;';
         container.innerHTML = `
             <div style="font-weight:600;margin-bottom:8px;">Stored answers for ${code}:</div>
             ${useful
@@ -251,41 +267,79 @@ function handler() {
                 </div>`
                 )
                 .join('')}
+            <div class="azalea-wac-status" style="font-size:12px;opacity:0.85;margin-top:6px;">
+                Loading match…
+            </div>
         `;
-        if (title?.parentElement) {
-            title.parentElement.insertBefore(container, title.nextSibling);
-        } else {
-            dialog.prepend(container);
-        }
     } else {
+        container.innerHTML = `
+            <div style="font-weight:600;margin-bottom:8px;">Stored answers for ${code}:</div>
+            <div class="azalea-wac-status" style="font-size:12px;opacity:0.85;margin-top:6px;">
+                No stored answers for this code
+            </div>
+        `;
         logger.info('No stored answers for', code);
     }
 
-    if (!paintMatches(code)) {
-        setTimeout(() => paintMatches(code), 200);
-        setTimeout(() => paintMatches(code), 500);
+    if (title?.parentElement) {
+        title.parentElement.insertBefore(container, title.nextSibling);
+    } else {
+        dialog.prepend(container);
+    }
+
+    // Aggressive short poll — KaTeX fills text after nodes exist
+    if (useful.length > 0 && !paintMatches(code)) {
+        let tries = 0;
+        const timer = setInterval(() => {
+            tries++;
+            setBannerStatus(code, `Loading match… (${tries})`);
+            if (paintMatches(code) || tries >= 20) {
+                clearInterval(timer);
+                if (tries >= 20) {
+                    const glowing = document.querySelectorAll(
+                        `.azalea-rainbow-glow[data-azalea-glow="${code}"]`
+                    ).length;
+                    if (!glowing) {
+                        setBannerStatus(code, 'Couldn’t auto-match — pick the card that matches above');
+                    }
+                }
+            }
+        }, 100); // up to ~2s
     }
 }
 
-function paintMatches(code: string) {
+function paintMatches(code: string): boolean {
     const stored = bookwork.get(code) ?? bookwork.get(code.toLowerCase()) ?? [];
     const useful = pickUsefulEntries(Array.isArray(stored) ? stored : []);
     if (!useful.length) return false;
 
-    const options = [
-        ...document.querySelectorAll(
-            '[class*="_Option_"][role="radio"], [role="radio"][class*="_Option_"], [class*="_GridOption_"] [class*="_Option_"], [class*="_Option_"]'
-        )
+    // Prefer clickable option nodes; GridOption is the outer card wrapper
+    let options = [
+        ...document.querySelectorAll('[class*="_Option_"][role="radio"]')
     ] as HTMLElement[];
 
     if (!options.length) {
+        options = [
+            ...document.querySelectorAll(
+                '[class*="_GridOption_"], [class*="_Option_"], [role="radio"]'
+            )
+        ] as HTMLElement[];
+    }
+
+    if (!options.length) {
         logger.debug('No options yet for', code);
+        setBannerStatus(code, 'Loading options…');
         return false;
+    }
+
+    // Already glowing?
+    if (document.querySelector(`.azalea-rainbow-glow[data-azalea-glow="${code}"]`)) {
+        setBannerStatus(code, 'Match found');
+        return true;
     }
 
     const candidates = getCandidateAnswers(useful);
 
-    // Score every option; only glow the best (and ties within a small margin)
     const scored = options.map(opt => {
         const text = opt.innerText || '';
         let best = 0;
@@ -301,19 +355,35 @@ function paintMatches(code: string) {
     });
 
     const max = Math.max(0, ...scored.map(s => s.best));
+
+    // IMPORTANT: options present but KaTeX not ready → return false so we keep polling
     if (max <= 0) {
-        logger.info('No confident match for', code, { candidates });
-        return true; // options exist, just no match
+        setBannerStatus(code, 'Loading match…');
+        return false;
     }
 
     scored.forEach(({ opt, best, via, text }) => {
         if (best < max || best <= 0) return;
         if (opt.dataset.azaleaGlow === code) return;
-        applyRainbowGlow(opt);
+
+        // Glow the outer card if this is an inner option
+        const card =
+            (opt.closest('[class*="_GridOption_"]') as HTMLElement) || opt;
+        applyRainbowGlow(card);
+        card.dataset.azaleaGlow = code;
         opt.dataset.azaleaGlow = code;
-        logger.log('Matched option:', text.replace(/\s+/g, ' ').slice(0, 80), 'via', via, 'score', best);
+
+        logger.log(
+            'Matched option:',
+            text.replace(/\s+/g, ' ').slice(0, 80),
+            'via',
+            via,
+            'score',
+            best
+        );
     });
 
+    setBannerStatus(code, 'Match found');
     return true;
 }
 
@@ -324,8 +394,15 @@ export default async function () {
         Infinity
     );
 
+    let scheduled = false;
     const observer = new MutationObserver(() => {
-        handler();
+        // Debounce — dialog mounts cause many mutations
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+            scheduled = false;
+            handler();
+        });
     });
 
     observer.observe(page, { childList: true, subtree: true });
